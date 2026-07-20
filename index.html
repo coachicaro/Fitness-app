@@ -179,6 +179,33 @@
 
   .settings-link{text-align:center; margin-top:6px;}
   .settings-link a{color:var(--muted-2); font-size:11px; text-decoration:underline; cursor:pointer;}
+
+  /* CONFIG PAGE */
+  .plan-day-card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:14px; overflow:hidden;}
+  .plan-day-header{display:flex; align-items:center; gap:10px; padding:12px 14px; cursor:pointer; user-select:none;}
+  .plan-day-header .day-label{font-family:'Oswald',sans-serif; text-transform:uppercase; font-size:16px; font-weight:600; flex:1;}
+  .plan-day-header .day-chevron{color:var(--muted); transition:transform .2s; font-size:16px;}
+  .plan-day-header.open .day-chevron{transform:rotate(180deg);}
+  .plan-day-body{display:none; padding:0 14px 14px;}
+  .plan-day-body.open{display:block;}
+  .plan-meta-row{display:flex; gap:8px; margin-bottom:12px;}
+  .plan-meta-row input{flex:1; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; color:var(--ink); font-family:'Inter',sans-serif; font-size:13px; padding:8px 10px;}
+  .plan-meta-row input:focus{outline:none; border-color:var(--orange);}
+  .plan-ex-row{display:flex; align-items:center; gap:6px; margin-bottom:8px;}
+  .plan-ex-row .ex-name-in{flex:2; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; color:var(--ink); font-family:'Inter',sans-serif; font-size:13px; padding:8px 10px;}
+  .plan-ex-row .ex-sets-in{width:48px; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; color:var(--ink); font-family:'Space Mono',monospace; font-size:13px; padding:8px 6px; text-align:center;}
+  .plan-ex-row .ex-reps-in{width:68px; background:var(--surface-2); border:1px solid var(--border); border-radius:7px; color:var(--ink); font-family:'Space Mono',monospace; font-size:12px; padding:8px 6px; text-align:center;}
+  .plan-ex-row input:focus{outline:none; border-color:var(--orange);}
+  .plan-ex-row .del-btn{width:30px; height:30px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--red); cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:15px;}
+  .plan-ex-labels{display:flex; gap:6px; margin-bottom:4px; padding-right:38px;}
+  .plan-ex-labels span{font-family:'Space Mono',monospace; font-size:9px; color:var(--muted-2); text-transform:uppercase; letter-spacing:.05em;}
+  .plan-ex-labels .l-name{flex:2;}
+  .plan-ex-labels .l-sets{width:48px; text-align:center;}
+  .plan-ex-labels .l-reps{width:68px; text-align:center;}
+  .add-ex-btn{width:100%; margin-top:4px; padding:9px; border-radius:8px; border:1px dashed var(--border); background:transparent; color:var(--muted); font-family:'Inter',sans-serif; font-size:12px; cursor:pointer;}
+  .add-ex-btn:hover{border-color:var(--orange); color:var(--orange);}
+  .config-save-wrap{position:sticky; bottom:84px; padding:12px 0 4px; background:var(--bg);}
+  .config-note{font-size:11px; color:var(--muted); font-family:'Space Mono',monospace; text-align:center; margin-top:8px;}
 </style>
 </head>
 <body>
@@ -290,6 +317,15 @@
     </div>
   </div>
 
+  <!-- PLANO (CONFIG) -->
+  <div class="page" id="page-plano">
+    <div id="plan-config-content"></div>
+    <div class="config-save-wrap">
+      <button class="btn btn-primary" id="savePlanBtn">Salvar plano</button>
+      <div class="config-note">Alterações no plano valem a partir do próximo treino.</div>
+    </div>
+  </div>
+
 </div>
 
 <div class="saved-toast" id="savedToast">Salvo</div>
@@ -311,11 +347,15 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg>
     Peso
   </button>
+  <button class="nav-btn" data-page="plano">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 010 14.14M4.93 4.93a10 10 0 000 14.14"/><path d="M15.54 8.46a5 5 0 010 7.07M8.46 8.46a5 5 0 000 7.07"/></svg>
+    Plano
+  </button>
 </nav>
 
 <script>
 /* ============== CONSTANTS ============== */
-const PLAN = {
+const DEFAULT_PLAN = {
   push:  {label:'Push',  sub:'Peito / Ombro / Tríceps', exercises:[
     {name:'Supino reto barra', sets:4, target:'6-8'},
     {name:'Desenvolvimento halteres', sets:3, target:'8-10'},
@@ -391,6 +431,7 @@ const DEFAULT_STATE = {
 };
 
 let state = structuredClone(DEFAULT_STATE);
+let activePlan = structuredClone(DEFAULT_PLAN);
 let currentDay = 'push';
 let weightChartInstance = null;
 let autoSaveTimer = null;
@@ -410,10 +451,12 @@ function brDate(d){ return d.toLocaleDateString('pt-BR', {weekday:'short', day:'
 async function loadState(){
   state = structuredClone(DEFAULT_STATE);
   try {
-    const [workouts, bests, diet, weights, meta] = await Promise.all([
+    const [workouts, bests, diet, weights, meta, planRows] = await Promise.all([
       sbGet('ft_workouts'), sbGet('ft_exercise_bests'),
-      sbGet('ft_diet'), sbGet('ft_weights'), sbGet('ft_meta')
+      sbGet('ft_diet'), sbGet('ft_weights'), sbGet('ft_meta'), sbGet('ft_plan')
     ]);
+    const savedPlan = planRows.find(r=>r.key==='plan');
+    activePlan = savedPlan ? savedPlan.value : structuredClone(DEFAULT_PLAN);
     state.workouts = workouts.map(w=>({id:w.id, date:w.date, day:w.day, exercises:w.exercises}));
     bests.forEach(b=>{ state.exerciseBests[b.exercise_name]={e1rm:b.e1rm, weight:b.weight, reps:b.reps, date:b.date}; });
     diet.forEach(d=>{ state.diet[d.date]=d.meals; });
@@ -449,6 +492,9 @@ async function clearAllData(){
     sbDeleteAll('ft_meta','key'),
   ]);
 }
+async function savePlan(plan){
+  await sbUpsert('ft_plan', {key:'plan', value: plan});
+}
 
 /* ============== TOAST ============== */
 function showToast(msg){
@@ -466,12 +512,13 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
     const page = btn.dataset.page;
     document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
     document.getElementById('page-'+page).classList.add('active');
-    const titles = {dashboard:'Dashboard', treino:'Treino', dieta:'Dieta', peso:'Controle de peso'};
+    const titles = {dashboard:'Dashboard', treino:'Treino', dieta:'Dieta', peso:'Controle de peso', plano:'Editar plano'};
     document.getElementById('pageTitle').textContent = titles[page];
     if(page==='dashboard') renderDashboard();
     if(page==='treino') renderTreino();
     if(page==='dieta') renderDieta();
     if(page==='peso') renderPeso();
+    if(page==='plano') renderConfig();
   });
 });
 
@@ -602,14 +649,14 @@ function calcE1RM(weight, reps){
 
 function renderTreino(){
   const subtabsEl = document.getElementById('treino-subtabs');
-  subtabsEl.innerHTML = Object.keys(PLAN).map(k =>
-    `<button class="subtab ${k===currentDay?'active':''}" data-day="${k}">${PLAN[k].label}</button>`
+  subtabsEl.innerHTML = Object.keys(activePlan).map(k =>
+    `<button class="subtab ${k===currentDay?'active':''}" data-day="${k}">${activePlan[k].label}</button>`
   ).join('');
   subtabsEl.querySelectorAll('.subtab').forEach(btn=>{
     btn.addEventListener('click', ()=>{ currentDay = btn.dataset.day; renderTreino(); });
   });
 
-  const dayData = PLAN[currentDay];
+  const dayData = activePlan[currentDay];
   const lastSession = findLastSession(currentDay, todayStr());
   const todaySession = state.workouts.find(w => w.day===currentDay && w.date===todayStr());
 
@@ -891,6 +938,95 @@ function renderWeightChart(){
     }
   });
 }
+
+/* ============== PLANO CONFIG ============== */
+function renderConfig(){
+  const el = document.getElementById('plan-config-content');
+  el.innerHTML = Object.entries(activePlan).map(([key, day])=>`
+    <div class="plan-day-card" data-day-key="${key}">
+      <div class="plan-day-header" onclick="toggleDayCard(this)">
+        <span class="day-label">${day.label} <span style="font-size:12px;font-family:Inter,sans-serif;font-weight:400;text-transform:none;color:var(--muted);">${day.sub}</span></span>
+        <span class="day-chevron">▾</span>
+      </div>
+      <div class="plan-day-body">
+        <div class="plan-meta-row">
+          <input class="cfg-label" placeholder="Nome do dia (ex: Push)" value="${day.label}">
+          <input class="cfg-sub" placeholder="Subtítulo (ex: Peito / Ombro)" value="${day.sub}">
+        </div>
+        <div class="plan-ex-labels">
+          <span class="l-name">Exercício</span>
+          <span class="l-sets">Séries</span>
+          <span class="l-reps">Reps</span>
+        </div>
+        <div class="exercises-list">
+          ${day.exercises.map((ex,i)=>`
+            <div class="plan-ex-row" data-ex-idx="${i}">
+              <input class="ex-name-in" placeholder="Nome do exercício" value="${ex.name}">
+              <input class="ex-sets-in" type="number" min="1" max="10" placeholder="4" value="${ex.sets}">
+              <input class="ex-reps-in" placeholder="6-8" value="${ex.target}">
+              <button class="del-btn" onclick="removeExercise(this)" title="Remover">✕</button>
+            </div>
+          `).join('')}
+        </div>
+        <button class="add-ex-btn" onclick="addExercise(this)">+ Adicionar exercício</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleDayCard(header){
+  header.classList.toggle('open');
+  header.nextElementSibling.classList.toggle('open');
+}
+
+function addExercise(btn){
+  const list = btn.previousElementSibling;
+  const idx = list.querySelectorAll('.plan-ex-row').length;
+  const row = document.createElement('div');
+  row.className = 'plan-ex-row';
+  row.dataset.exIdx = idx;
+  row.innerHTML = `
+    <input class="ex-name-in" placeholder="Nome do exercício" value="">
+    <input class="ex-sets-in" type="number" min="1" max="10" placeholder="3" value="3">
+    <input class="ex-reps-in" placeholder="8-12" value="8-12">
+    <button class="del-btn" onclick="removeExercise(this)" title="Remover">✕</button>`;
+  list.appendChild(row);
+  row.querySelector('.ex-name-in').focus();
+}
+
+function removeExercise(btn){
+  const row = btn.closest('.plan-ex-row');
+  if(row.closest('.exercises-list').querySelectorAll('.plan-ex-row').length <= 1){
+    alert('Precisa ter pelo menos um exercício no dia.'); return;
+  }
+  row.remove();
+}
+
+function readPlanFromDOM(){
+  const plan = {};
+  document.querySelectorAll('.plan-day-card').forEach(card=>{
+    const key = card.dataset.dayKey;
+    const label = card.querySelector('.cfg-label').value.trim() || key;
+    const sub   = card.querySelector('.cfg-sub').value.trim();
+    const exercises = [];
+    card.querySelectorAll('.plan-ex-row').forEach(row=>{
+      const name   = row.querySelector('.ex-name-in').value.trim();
+      const sets   = parseInt(row.querySelector('.ex-sets-in').value) || 3;
+      const target = row.querySelector('.ex-reps-in').value.trim() || '8-12';
+      if(name) exercises.push({name, sets, target});
+    });
+    if(exercises.length) plan[key] = {label, sub, exercises};
+  });
+  return plan;
+}
+
+document.getElementById('savePlanBtn').addEventListener('click', async ()=>{
+  const newPlan = readPlanFromDOM();
+  if(!Object.keys(newPlan).length){ alert('Plano vazio.'); return; }
+  activePlan = newPlan;
+  await savePlan(activePlan);
+  showToast('Plano salvo');
+});
 
 /* ============== INIT ============== */
 (async function init(){
