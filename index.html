@@ -240,7 +240,10 @@
   <div class="page" id="page-treino">
     <div class="subtabs" id="treino-subtabs"></div>
     <div id="treino-content"></div>
-    <button class="btn btn-primary" id="saveWorkoutBtn">Salvar treino do dia</button>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
+      <button class="btn btn-primary" id="saveWorkoutBtn" style="flex:1;">Confirmar treino do dia</button>
+      <div id="autoSaveIndicator" style="font-family:'Space Mono',monospace; font-size:10px; color:var(--muted); white-space:nowrap; flex-shrink:0; opacity:0; transition:opacity .3s;">✓ salvo</div>
+    </div>
   </div>
 
   <!-- DIETA -->
@@ -357,19 +360,40 @@ const MEALS = [
   {key:'jantar', title:'Jantar', desc:'150g carne magra/peixe + batata doce + legumes'},
   {key:'ceia', title:'Ceia', desc:'Queijo cottage + castanhas (se bater fome)'},
 ];
-const STORAGE_KEY = 'fitness-tracker-data';
+/* ============== SUPABASE CONFIG ============== */
+const SUPABASE_URL = 'https://cbwupjmzhtjqadrcttfs.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNid3Vwam16aHRqcWFkcmN0dGZzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk0NzYzMTcsImV4cCI6MjA5NTA1MjMxN30.nuEZd_hhnCr5gegnAz6_XyDFozIRYUs2EYjO3RQ6WWE';
+const SB_H = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json' };
+
+async function sbGet(table){
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=*`, {headers: SB_H});
+  if(!r.ok) throw new Error(`GET ${table}: ${r.status}`);
+  return r.json();
+}
+async function sbUpsert(table, data){
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method:'POST',
+    headers:{...SB_H, 'Prefer':'resolution=merge-duplicates,return=minimal'},
+    body: JSON.stringify(Array.isArray(data) ? data : [data])
+  });
+  if(!r.ok){ const t=await r.text(); throw new Error(`UPSERT ${table}: ${t}`); }
+}
+async function sbDeleteAll(table, col){
+  await fetch(`${SUPABASE_URL}/rest/v1/${table}?${col}=not.is.null`, {method:'DELETE', headers: SB_H});
+}
 
 const DEFAULT_STATE = {
   programStart: null,
-  workouts: [],          // {id, date, day, exercises:[{name, sets:[{weight,reps,e1rm,isPR}]}]}
-  exerciseBests: {},      // name -> {e1rm, weight, reps, date}
-  diet: {},               // date -> {mealKey: bool}
-  weights: {},            // date -> number
+  workouts: [],
+  exerciseBests: {},
+  diet: {},
+  weights: {},
 };
 
 let state = structuredClone(DEFAULT_STATE);
 let currentDay = 'push';
 let weightChartInstance = null;
+let autoSaveTimer = null;
 
 /* ============== DATE HELPERS ============== */
 function todayStr(){ return fmtDate(new Date()); }
@@ -382,28 +406,48 @@ function monthKey(d){ return `${d.getFullYear()}-${d.getMonth()}`; }
 function quarterKey(d){ return `${d.getFullYear()}-Q${Math.floor(d.getMonth()/3)}`; }
 function brDate(d){ return d.toLocaleDateString('pt-BR', {weekday:'short', day:'2-digit', month:'2-digit'}); }
 
-/* ============== STORAGE ============== */
+/* ============== STORAGE (Supabase) ============== */
 async function loadState(){
-  try{
-    const res = await window.storage.get(STORAGE_KEY, false);
-    if(res && res.value){
-      const parsed = JSON.parse(res.value);
-      state = Object.assign(structuredClone(DEFAULT_STATE), parsed);
-    } else {
-      state = structuredClone(DEFAULT_STATE);
+  state = structuredClone(DEFAULT_STATE);
+  try {
+    const [workouts, bests, diet, weights, meta] = await Promise.all([
+      sbGet('ft_workouts'), sbGet('ft_exercise_bests'),
+      sbGet('ft_diet'), sbGet('ft_weights'), sbGet('ft_meta')
+    ]);
+    state.workouts = workouts.map(w=>({id:w.id, date:w.date, day:w.day, exercises:w.exercises}));
+    bests.forEach(b=>{ state.exerciseBests[b.exercise_name]={e1rm:b.e1rm, weight:b.weight, reps:b.reps, date:b.date}; });
+    diet.forEach(d=>{ state.diet[d.date]=d.meals; });
+    weights.forEach(w=>{ state.weights[w.date]=w.weight; });
+    const sm = meta.find(m=>m.key==='programStart');
+    if(sm){ state.programStart = sm.value; }
+    else {
+      state.programStart = todayStr();
+      await sbUpsert('ft_meta', {key:'programStart', value:state.programStart});
     }
-  }catch(e){
-    state = structuredClone(DEFAULT_STATE);
+  } catch(e) {
+    console.error('Erro ao carregar Supabase:', e);
+    state.programStart = todayStr();
   }
-  if(!state.programStart) state.programStart = todayStr();
-  await saveState();
 }
-async function saveState(){
-  try{
-    await window.storage.set(STORAGE_KEY, JSON.stringify(state), false);
-  }catch(e){
-    console.error('Erro ao salvar', e);
-  }
+async function saveWorkoutData(session){
+  await sbUpsert('ft_workouts', {id:session.id, date:session.date, day:session.day, exercises:session.exercises});
+  const bRows = Object.entries(state.exerciseBests).map(([name,b])=>({exercise_name:name, e1rm:b.e1rm, weight:b.weight, reps:b.reps, date:b.date}));
+  if(bRows.length) await sbUpsert('ft_exercise_bests', bRows);
+}
+async function saveDietData(date){
+  await sbUpsert('ft_diet', {date, meals: state.diet[date]||{}});
+}
+async function saveWeightData(date, weight){
+  await sbUpsert('ft_weights', {date, weight});
+}
+async function clearAllData(){
+  await Promise.all([
+    sbDeleteAll('ft_workouts','id'),
+    sbDeleteAll('ft_exercise_bests','exercise_name'),
+    sbDeleteAll('ft_diet','date'),
+    sbDeleteAll('ft_weights','date'),
+    sbDeleteAll('ft_meta','key'),
+  ]);
 }
 
 /* ============== TOAST ============== */
@@ -537,9 +581,10 @@ function renderDashboard(){
 
 document.getElementById('resetLink').addEventListener('click', async ()=>{
   if(confirm('Tem certeza que quer apagar todos os dados (treinos, dieta e peso)? Isso não pode ser desfeito.')){
+    await clearAllData();
     state = structuredClone(DEFAULT_STATE);
     state.programStart = todayStr();
-    await saveState();
+    await sbUpsert('ft_meta', {key:'programStart', value:state.programStart});
     renderDashboard();
     showToast('Dados zerados');
   }
@@ -603,10 +648,13 @@ function renderTreino(){
           ${setsHtml}
         </div>`;
     }).join('');
+
+  // Attach auto-save listeners após renderizar os inputs
+  attachAutoSave();
 }
 
-document.getElementById('saveWorkoutBtn').addEventListener('click', async ()=>{
-  const dayData = PLAN[currentDay];
+/* Lê todos os campos do DOM e persiste o treino. silent=true não mostra toast nem re-renderiza. */
+async function commitWorkout(silent = false){
   const date = todayStr();
   const exercises = [];
   document.querySelectorAll('#treino-content .ex-block').forEach(block=>{
@@ -629,19 +677,50 @@ document.getElementById('saveWorkoutBtn').addEventListener('click', async ()=>{
     if(sets.length) exercises.push({name, sets});
   });
 
-  if(exercises.length === 0){
-    alert('Preencha pelo menos uma série com peso e reps antes de salvar.');
-    return;
-  }
+  if(exercises.length === 0) return false;
 
   const existingIdx = state.workouts.findIndex(w => w.day===currentDay && w.date===date);
   const session = {id: existingIdx>=0 ? state.workouts[existingIdx].id : Date.now(), date, day: currentDay, exercises};
   if(existingIdx >= 0) state.workouts[existingIdx] = session;
   else state.workouts.push(session);
 
-  await saveState();
-  renderTreino();
-  showToast('Treino salvo');
+  await saveWorkoutData(session);
+
+  if(!silent){
+    renderTreino();
+    showToast('Treino confirmado');
+  } else {
+    // Mostra indicador de auto-save sem re-renderizar
+    const ind = document.getElementById('autoSaveIndicator');
+    if(ind){ ind.style.opacity='1'; setTimeout(()=>ind.style.opacity='0', 1800); }
+    // Atualiza badges de PR sem re-renderizar tudo
+    document.querySelectorAll('#treino-content .ex-block').forEach(block=>{
+      const name = block.dataset.exname;
+      const todayEx = session.exercises.find(e=>e.name===name);
+      block.querySelectorAll('.set-row').forEach((row, i)=>{
+        const slot = row.querySelector('.pr-slot');
+        const s = todayEx && todayEx.sets[i];
+        if(slot) slot.innerHTML = s && s.isPR ? `<span class="pr-badge">PR</span>` : '';
+      });
+    });
+  }
+  return true;
+}
+
+/* Auto-save com debounce de 600ms em qualquer input de treino */
+function attachAutoSave(){
+  document.querySelectorAll('#treino-content .w-input, #treino-content .r-input').forEach(inp=>{
+    inp.addEventListener('input', ()=>{
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(()=> commitWorkout(true), 600);
+    });
+  });
+}
+
+document.getElementById('saveWorkoutBtn').addEventListener('click', async ()=>{
+  clearTimeout(autoSaveTimer);
+  const ok = await commitWorkout(false);
+  if(!ok) alert('Preencha pelo menos uma série com peso e reps antes de confirmar.');
 });
 
 /* ============== DIETA PAGE ============== */
@@ -666,7 +745,7 @@ function renderDieta(){
       const key = chk.dataset.meal;
       dayData[key] = !dayData[key];
       chk.classList.toggle('checked');
-      await saveState();
+      await saveDietData(date);
       const allChecked = MEALS.every(m=>dayData[m.key]);
       document.getElementById('day-complete-flag').style.display = allChecked ? 'block' : 'none';
       if(allChecked) showToast('Dia 100% completo 🎯');
@@ -753,8 +832,9 @@ function renderPeso(){
 document.getElementById('saveWeighBtn').addEventListener('click', async ()=>{
   const val = parseFloat(document.getElementById('weighInput').value);
   if(isNaN(val) || val<=0){ alert('Digite um peso válido.'); return; }
-  state.weights[todayStr()] = val;
-  await saveState();
+  const d = todayStr();
+  state.weights[d] = val;
+  await saveWeightData(d, val);
   renderPeso();
   showToast('Peso registrado');
 });
